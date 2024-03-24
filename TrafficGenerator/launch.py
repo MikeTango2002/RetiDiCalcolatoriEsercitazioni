@@ -4,7 +4,7 @@ import subprocess
 
 num_nodes = 10
 project_directory = "./src"
-image = "miketango2002/broadcast_node"
+image = "miketango2002/traffic_generator"
 
 # Return a random connected graph n nodes and n-1 edges 
 def get_random_edges(num_nodes):
