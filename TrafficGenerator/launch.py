@@ -1,9 +1,9 @@
+
 import random
 import subprocess
 
 num_nodes = 10
 project_directory = "./src"
-all_connected = True
 image = "miketango2002/broadcast_node"
 
 # Return a random connected graph n nodes and n-1 edges 
@@ -46,26 +46,16 @@ def get_yaml(num_nodes, edges):
             buffer += "\t\t\tdockerfile: Dockerfile\n"
 
         params = [f"'{node}'"]
-        if all_connected:
-            for edge in edges:
-                if edge[0] == node:
-                    params.append(f"'{edge[1]}'")
-                if edge[1] == node:
-                    params.append(f"'{edge[0]}'")
-
         params = ", ".join(params)
-
         buffer += f"\t\tcommand: [{params}]\n"
 
-        if not all_connected:
-            buffer += "\t\tnetworks:\n"
-            for edge in edges:
-                if node in edge:
-                    buffer += f"\t\t- edge_{edge[0]}_{edge[1]}\n"
-    if not all_connected:
-        buffer += "networks:\n"
+        buffer += "\t\tnetworks:\n"
         for edge in edges:
-            buffer += f"\tedge_{edge[0]}_{edge[1]}:\n"
+            if node in edge:
+                buffer += f"\t\t- edge_{edge[0]}_{edge[1]}\n"
+    buffer += "networks:\n"
+    for edge in edges:
+        buffer += f"\tedge_{edge[0]}_{edge[1]}:\n"
 
     buffer = buffer.replace("\t", "  ")
     return buffer
@@ -74,12 +64,6 @@ with open("compose.yaml", "w+") as file:
     file.write(get_yaml(num_nodes, get_random_edges(num_nodes)))
 
 cmd = "docker compose up --build"
-
-result = subprocess.run(cmd.split(" "), stderr=subprocess.PIPE)
-
-print(result.stderr.decode('utf-8'))
-
-cmd = "docker compose down"
 
 result = subprocess.run(cmd.split(" "), stderr=subprocess.PIPE)
 

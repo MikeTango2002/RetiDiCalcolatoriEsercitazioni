@@ -1,0 +1,69 @@
+services:
+  node0:
+    image: miketango2002/broadcast_node
+    command: ['0']
+    networks:
+    - edge_0_2
+    - edge_0_5
+    - edge_0_3
+    - edge_0_1
+  node1:
+    image: miketango2002/broadcast_node
+    command: ['1']
+    networks:
+    - edge_0_1
+  node2:
+    image: miketango2002/broadcast_node
+    command: ['2']
+    networks:
+    - edge_2_7
+    - edge_0_2
+  node3:
+    image: miketango2002/broadcast_node
+    command: ['3']
+    networks:
+    - edge_3_6
+    - edge_3_9
+    - edge_3_4
+    - edge_3_8
+    - edge_0_3
+  node4:
+    image: miketango2002/broadcast_node
+    command: ['4']
+    networks:
+    - edge_3_4
+  node5:
+    image: miketango2002/broadcast_node
+    command: ['5']
+    networks:
+    - edge_0_5
+  node6:
+    image: miketango2002/broadcast_node
+    command: ['6']
+    networks:
+    - edge_3_6
+  node7:
+    image: miketango2002/broadcast_node
+    command: ['7']
+    networks:
+    - edge_2_7
+  node8:
+    image: miketango2002/broadcast_node
+    command: ['8']
+    networks:
+    - edge_3_8
+  node9:
+    image: miketango2002/broadcast_node
+    command: ['9']
+    networks:
+    - edge_3_9
+networks:
+  edge_2_7:
+  edge_0_2:
+  edge_3_6:
+  edge_3_9:
+  edge_3_4:
+  edge_0_5:
+  edge_3_8:
+  edge_0_3:
+  edge_0_1:
