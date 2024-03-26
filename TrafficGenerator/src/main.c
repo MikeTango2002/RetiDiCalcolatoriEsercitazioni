@@ -5,93 +5,43 @@
 #include <sys/socket.h>
 #include <asm-generic/socket.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <arpa/inet.h>
+#include <stdarg.h>
+#include <sys/time.h>
+#include <signal.h>
 
 
-typedef struct Message {
-    int source;
-    int sequence;
-    int payload_lenght;
-    char * payload;
-} Message;
+#include "traffic_generator.h"
 
-typedef struct Payload {
-    int value;
-} Payload;
+#define handle_error(msg) do{ perror(msg); exit(EXIT_FAILURE); }while(0)
 
-Message * prepare_message(Payload * payload);
+#define PORT 9090
 
-//---------------
-// Traffic Generator
-//---------------
+#define TIME_FRAME_MSEC 10
 
-// Some sistem that triggers handler callback every x milliseconds
+#define NUM_NODES 10
 
-//---------------
-// Broadcaster
-//---------------
 
-typedef void (*BroadcasterHandler)(void * broadcaster, Payload * payload);
-
-typedef struct Broadcaster {
-    // .. Local data to manage broadcast
-    // e.g. socket opened, network interfaces, 
-    // sequence of other nodes...
-
-    BroadcasterHandler handler;
-} Broadcaster;
-
-void register_handler(Broadcaster * broadcaster, BroadcasterHandler handler) {
-    broadcaster->handler = handler;
-}
-
-void send_broadcaster(Broadcaster * broadcaster, Payload * payload) {
-    // Send UDP packet and update local sequence
-}
-
-void process_broadcaster(Broadcaster * broadcaster) {
-    // In case of packet reception, notify the handler
-    // Discard already seen packets
-}
-
-//---------------
-// Traffic Analyzer
-//---------------
-
-typedef struct TrafficAnalyzer {
-
-    // Definition of sliding window...
-
-} TrafficAnalyzer;
-
-void received_pkt(TrafficAnalyzer * analyzer, int source) {
-    // Record the packet sent and datetime of it
-}
-
-void dump(TrafficAnalyzer * analyzer) {
-    // Dump information about the trhoughput of all packets received
-}
 
 //-------------------------
 // Utility
 // ------------------------
 
-/**
- * Bind the given socket to all interfaces (one by one)
- * and invoke the handler with same parameter
- */
-void bind_to_all_interfaces(int sock, void * context, void (*handler)(int, void *)) {
-    struct ifaddrs *addrs, *tmp;
-    getifaddrs(&addrs);
-    tmp = addrs;
-    while (tmp){
-        if (tmp->ifa_addr && tmp->ifa_addr->sa_family == AF_PACKET) {
-            setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, tmp->ifa_name, sizeof(tmp->ifa_name));
-            handler(sock, context);
-        }
-        tmp = tmp->ifa_next;
-    }
-    freeifaddrs(addrs);
-}
+//global variables
+
+int nodes_pkt_last_sequence_num[NUM_NODES];
+
+TrafficAnalyzer * analyzer;
+
+int nodes_pkt_received[NUM_NODES];
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+//////
 
 /**
  * Sleep a given amount of milliseconds
@@ -116,44 +66,473 @@ int msleep(long msec){
 }
 
 
-//My functions
-void  routine_1(void * arg){
+//Create socket broadcast and bind it with port
+int create_socket_broadcast(){
 
-    sleep(10);
-    printf("Thread 1\n");
-     pthread_exit(NULL);
+    int sock;
+    int yes = 1;
+    struct sockaddr_in my_addr;
+    int addr_len;
+    int ret;
+
+    
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0){
+        handle_error("socket error");
+    }
+
+    ret = setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char *)&yes, sizeof(yes));
+    if (ret == -1){
+        handle_error("setsockopt error");
+    }
+
+    //initialise sockaddr struct
+    addr_len = sizeof(struct sockaddr_in);
+    memset((void *)&my_addr, 0, addr_len);
+    my_addr.sin_family = AF_INET;
+    my_addr.sin_addr.s_addr = htons(INADDR_ANY);
+    my_addr.sin_port = htons(PORT);
+
+    ret = bind(sock, (struct sockaddr *)&my_addr, addr_len);
+
+    if (ret < 0){
+
+        handle_error("bind error");
+    }
+
+    return sock;
+    
 }
 
-void  routine_2(void * arg){
+struct sockaddr_in * initialise_broadcast_addr(){
+
+    int addr_len = sizeof(struct sockaddr_in);
+    struct sockaddr_in * broadcast_addr = malloc(addr_len);
+
+    if (broadcast_addr == NULL){
+        
+        handle_error("Malloc errror");
+    }
+
+    memset(broadcast_addr, 0, addr_len);
+    broadcast_addr -> sin_family = AF_INET;
+    broadcast_addr -> sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    broadcast_addr -> sin_port = htons(PORT);
+
+    return broadcast_addr;
+
+}
+
+//Function to create a new network node
+
+Node * create_node(int id){
+
+    Node * node = malloc(sizeof(Node));
+    
+    if (node == NULL){
+        
+        handle_error("Malloc errror");
+    }
+
+    node -> id = id;
+    node -> sock = create_socket_broadcast();
+    node -> broadcast_addr = initialise_broadcast_addr();
+    return node;
+}
+
+
+//Function to create a new message with random int payload
+
+Message * prepare_message(int source){
+
+    Message * msg = malloc(sizeof(Message));
+
+    if(msg == NULL){
+
+        handle_error("Error during malloc");
+    }
+
+    int value = rand() % 100;
+
+    Payload payload = {0};
+
+    payload.value = value;
+
+    msg -> source = source;
+    msg -> hop = 0;
+    msg -> payload_lenght = sizeof(payload);
+    msg -> payload = payload;
+
+    return msg;
+
+}
+
+
+
+/**
+ * Bind the given socket to all interfaces (one by one)
+ * and send the message
+ */
+void send_to_all_interfaces(Node * node, Message * msg) {
+
+    struct ifaddrs *addrs, *tmp;
+    int ret;
+
+    getifaddrs(&addrs);
+    tmp = addrs;
+
+        while (tmp){
+
+            ret = setsockopt(node->sock, SOL_SOCKET, SO_BINDTODEVICE, tmp->ifa_name, sizeof(tmp->ifa_name));
+            if(ret < 0){
+
+                handle_error("Recv socket bind interface");
+
+            }
+            
+            pthread_mutex_lock(&mutex);
+            ret = sendto(node->sock, msg, sizeof(Message), 0, (struct sockaddr *) node->broadcast_addr, sizeof(struct sockaddr_in));
+            if(ret < 0){
+
+                handle_error("Recv socket bind interface");
+
+            }
+            pthread_mutex_unlock(&mutex);
+
+            tmp = tmp->ifa_next;
+        }
+
+        freeifaddrs(addrs);
+
+        // Listen from all interfaces
+        ret = setsockopt(node->sock, SOL_SOCKET, SO_BINDTODEVICE, NULL, 0);
+        if (ret < 0){
+
+        handle_error("Recv socket bind interface");
+    }
+
+}
+
+
+
+
+//---------------
+// Traffic Generator
+//---------------
+
+
+// Some sistem that triggers handler callback every x milliseconds
+void * traffic_generator(void * node_ptr){
+
+    Node * node = (Node *) node_ptr;
+
+    Message * msg;
+    Payload payload = {0};
+    int value;
+    
+    while(1){
+
+        msg = prepare_message(node->id);
+
+        msleep(TIME_FRAME_MSEC);
+
+        send_to_all_interfaces(node, msg);
+         
+    }
+}
+
+
+
+//---------------
+// Broadcaster
+//---------------
+
+void send_broadcaster(Node * node, Message * msg) {
+    // Send UDP packet and update local sequence
+    
+    msg -> hop++;
+
+    send_to_all_interfaces(node, msg);
+}
+
+void process_broadcaster(Node * node) {
+    // In case of packet reception, notify the handler
+    // Discard already seen packets
+    
+
+    socklen_t addr_len;
+    struct sockaddr_in client_addr;
+    fd_set readfd;
+
+    Message * msg = malloc(sizeof(Message));
+    if (msg == NULL){
+
+        handle_error("Malloc error");
+    }
+
+
+
+
+#ifdef DEBUG
+    printf("%d: inizializing Node...\n", node->id);
+#endif
+
+    int espected_count = 0;
+    int count;
+
+    while (1)
+    {
+        FD_ZERO(&readfd);
+        FD_SET(node->sock, &readfd);
+
+        struct timeval tv = {5, 0};
+        int ret = select(node->sock + 1, &readfd, NULL, NULL, &tv);
+        if (ret > 0){
+
+            if (FD_ISSET(node->sock, &readfd)){
+
+                count = recvfrom(node->sock, msg, sizeof(Message), 0, (struct sockaddr *)&client_addr, (socklen_t *)&addr_len);
+                if(ret < 0){
+
+                handle_error("Recvfrom error");
+
+                }
+
+                //if msg -> hop <= nodes_pkt_last_sequence_num[node->id] : discard packet (already received)
+                if (msg -> hop >= nodes_pkt_last_sequence_num[node->id]){
+                    nodes_pkt_last_sequence_num[node->id] = msg -> hop;
+
+                    #ifdef DEBUG
+                    printf("%d: recv %d from %d:msg hop %d\n", node->id, msg->payload.value, msg->source, msg->hop);
+                    #endif
+
+                    send_broadcaster(node, msg);
+                    if (ret < 0)
+                    {
+                        handle_error("Error sending broadcast");
+                    }
+
+                    //add packet to the list of packets received
+                    received_pkt(analyzer, msg);
+                }
+                
+
+            }
+        }
+    }
+
+
+}
+
+void * broadcaster(void * node_ptr){
+
+    Node * node = (Node *) node_ptr;
+
+    process_broadcaster(node);
+
+}
+
+
+
+//---------------
+// Traffic Analyzer
+//---------------
+
+TrafficAnalyzer * create_traffic_analyzer(){
+
+    TrafficAnalyzer * traffic_analyzer_list = malloc(sizeof(TrafficAnalyzer));
+
+    if (traffic_analyzer_list == NULL){
+
+        handle_error("Malloc error");
+    }
+
+    traffic_analyzer_list -> head = NULL;
+    traffic_analyzer_list -> tail = NULL;
+
+    return traffic_analyzer_list;
+}
+
+void received_pkt(TrafficAnalyzer * analyzer, Message *msg) {
+    // Record the packet sent and datetime of it
+    struct timeval datetime;
+
+    gettimeofday(&datetime, NULL);
+
+    append_node_traffic_analyzer(analyzer, msg, datetime);
+}
+
+void append_node_traffic_analyzer(TrafficAnalyzer * traffic_analyzer, Message * msg, struct timeval datetime){
+
+    NodeTrafficAnalyzer * node = malloc(sizeof(NodeTrafficAnalyzer));
+
+    if(node == NULL){
+
+        handle_error("Malloc error");
+    }
+
+    node -> msg = msg;
+    node -> datetime = datetime;
+    
+    if (traffic_analyzer -> head == NULL){
+
+        traffic_analyzer -> head = node;
+        traffic_analyzer -> tail = node;
+
+        node -> next = NULL;
+        node -> prev = NULL;
+
+        return;
+
+    }
+
+    else{
+
+         node -> prev = traffic_analyzer -> tail;
+         node -> next = NULL;
+         traffic_analyzer -> tail = node;
+
+         return;
+    }
+}
+
+void * dump(void * args) {
+    // Dump information about the trhoughput of all packets received every second
+    //Sliding window of 2 sec
+    //Remove old nodes from the list of TrafficAnalyzer object
+
+    struct timeval time_last_pkt_received;
+    NodeTrafficAnalyzer * tmp;
+    double diff;
 
     while(1){
 
-        printf("Thread 2\n");
+        memset(nodes_pkt_received, 0, sizeof(nodes_pkt_received));
+
         sleep(1);
+
+        if(analyzer -> tail == NULL){
+
+            continue;
+        }
+
+        time_last_pkt_received = analyzer -> tail -> datetime;
+
+        tmp = analyzer -> tail;
+
+        while(tmp != NULL){
+
+            diff = (time_last_pkt_received.tv_sec - tmp->datetime.tv_sec) * 1000.0;      // seconds in milliseconds
+            diff += (time_last_pkt_received.tv_usec - tmp->datetime.tv_usec) / 1000.0;   // microseconds in milliseconds
+
+            if (diff <= 2000){
+
+                nodes_pkt_received[tmp->msg->source] += 1;
+
+                tmp = tmp -> prev;
+            }
+
+            else{
+
+                analyzer -> head = tmp -> next;
+                break;
+            }
+            
+        }
+
+        print_throughput();
+
     }
-     pthread_exit(NULL);
+    
 }
+
+void print_throughput(){
+
+    for(int i=0; i <= NUM_NODES - 2; i++){
+
+        printf("%d: %04d, ", i, nodes_pkt_received[i]);
+    }
+
+    printf("%d: %04d\n", NUM_NODES - 1, nodes_pkt_received[NUM_NODES - 1]);
+}
+
 ////
 
-int main() {
+void handle_alarm(int signum){
+
+    printf("Time expired. Terminating simulation...\n");
+    exit(EXIT_SUCCESS);
+}
+
+
+
+//---------------
+// Main
+//---------------
+
+int main(int argc, char * argv[]) {
 
     // Autoflush stdout for docker
     setvbuf(stdout, NULL, _IONBF, 0);
 
+    if(argc != 2){
+        
+        handle_error("Wrong number of args");
+    }
+    
+    signal(SIGALRM, handle_alarm);
+
+    int ret;
+    int id = atoi(argv[1]);
+
+    Node * node = create_node(id);
+
+    memset(nodes_pkt_last_sequence_num, 0, sizeof(nodes_pkt_last_sequence_num));
+    
+    analyzer = create_traffic_analyzer();
+
+
+
+    //Using threads to handle the main nodes function simultaneously
+    pthread_t threads[3];
+
+    alarm(20);
+    
     // Traffic generator
+    //printf("Creating thread traffic generator\n");
+    ret = pthread_create(&threads[0], NULL, traffic_generator, node);
+    
+    if (ret < 0){
+
+        handle_error("TrafficGenerator thread");
+    }
 
     // Broadcaster
+    //printf("Creating thread broadcaster\n");
+    ret = pthread_create(&threads[1], NULL, broadcaster, node);
+    
+    if (ret < 0){
+
+        handle_error("Broadcaster thread");
+    }
 
     // Traffic analyzer
+    //printf("Creating thread traffic analyzer\n");
+    ret = pthread_create(&threads[2], NULL, dump, NULL);
+    
+    if (ret < 0){
 
-    pthread_t threads[2];
+        handle_error("Broadcaster thread");
+    }
 
-    int ret = pthread_create(&threads[0], NULL, (void *)routine_1, NULL);
-    ret = pthread_create(&threads[1], NULL, (void *)routine_2, NULL);
+
+
+    
+    //
 
     ret =  pthread_join(threads[0], NULL);
     ret =  pthread_join(threads[1], NULL);
-
+    ret =  pthread_join(threads[2], NULL);
 
     return 0;
 }
