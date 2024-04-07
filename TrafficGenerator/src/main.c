@@ -450,10 +450,10 @@ void print_throughput(){
 
     for(int i=0; i <= NUM_NODES - 2; i++){
 
-        printf("%d: %04d, ", i, nodes_pkt_received[i]);
+        printf("%d: %04d, ", i, nodes_pkt_received[i] / 2);
     }
 
-    printf("%d: %04d\n", NUM_NODES - 1, nodes_pkt_received[NUM_NODES - 1]);
+    printf("%d: %04d\n", NUM_NODES - 1, nodes_pkt_received[NUM_NODES - 1] / 2);
 }
 
 ////
