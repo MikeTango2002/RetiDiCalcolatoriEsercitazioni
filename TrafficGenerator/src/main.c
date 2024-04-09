@@ -25,6 +25,7 @@
 
 #define NUM_NODES 10
 
+//#define DEBUG 1
 
 
 //-------------------------
@@ -40,6 +41,8 @@ TrafficAnalyzer * analyzer;
 int nodes_pkt_received[NUM_NODES];
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_mutex_t mutex_list_analyzer = PTHREAD_MUTEX_INITIALIZER;
 
 //////
 
@@ -143,7 +146,7 @@ Node * create_node(int id){
 
 //Function to create a new message with random int payload
 
-Message * prepare_message(int source){
+Message * prepare_message(int source, int sequence_num){
 
     Message * msg = malloc(sizeof(Message));
 
@@ -159,7 +162,7 @@ Message * prepare_message(int source){
     payload.value = value;
 
     msg -> source = source;
-    msg -> hop = 0;
+    msg -> sequence_num = sequence_num;
     msg -> payload_lenght = sizeof(payload);
     msg -> payload = payload;
 
@@ -202,14 +205,15 @@ void send_to_all_interfaces(Node * node, Message * msg) {
             tmp = tmp->ifa_next;
         }
 
-        freeifaddrs(addrs);
+    freeifaddrs(addrs);
 
-        // Listen from all interfaces
-        ret = setsockopt(node->sock, SOL_SOCKET, SO_BINDTODEVICE, NULL, 0);
-        if (ret < 0){
+    // Listen from all interfaces
+    ret = setsockopt(node->sock, SOL_SOCKET, SO_BINDTODEVICE, NULL, 0);
+    if (ret < 0){
 
         handle_error("Recv socket bind interface");
     }
+    
 
 }
 
@@ -229,15 +233,19 @@ void * traffic_generator(void * node_ptr){
     Message * msg;
     Payload payload = {0};
     int value;
+    srand( (unsigned)time( NULL ) );
+
+    int sequence_num = 0;
     
     while(1){
 
-        msg = prepare_message(node->id);
+        msg = prepare_message(node->id, sequence_num);
 
         msleep(TIME_FRAME_MSEC);
 
         send_to_all_interfaces(node, msg);
-         
+
+        sequence_num++;
     }
 }
 
@@ -250,7 +258,7 @@ void * traffic_generator(void * node_ptr){
 void send_broadcaster(Node * node, Message * msg) {
     // Send UDP packet and update local sequence
     
-    msg -> hop++;
+    //msg -> hop++;
 
     send_to_all_interfaces(node, msg);
 }
@@ -260,8 +268,6 @@ void process_broadcaster(Node * node) {
     // Discard already seen packets
     
 
-    socklen_t addr_len;
-    struct sockaddr_in client_addr;
     fd_set readfd;
 
     Message * msg = malloc(sizeof(Message));
@@ -277,7 +283,6 @@ void process_broadcaster(Node * node) {
     printf("%d: inizializing Node...\n", node->id);
 #endif
 
-    int espected_count = 0;
     int count;
 
     while (1)
@@ -291,33 +296,39 @@ void process_broadcaster(Node * node) {
 
             if (FD_ISSET(node->sock, &readfd)){
 
-                count = recvfrom(node->sock, msg, sizeof(Message), 0, (struct sockaddr *)&client_addr, (socklen_t *)&addr_len);
+                count = recvfrom(node->sock, msg, sizeof(Message), 0, NULL, 0);
                 if(ret < 0){
 
                 handle_error("Recvfrom error");
 
                 }
+            
+                //if msg -> hop <= nodes_pkt_last_sequence_num[msg -> source] : discard packet (already received)
+                if (msg -> sequence_num > nodes_pkt_last_sequence_num[msg -> source]){
+                    nodes_pkt_last_sequence_num[msg -> source] = msg -> sequence_num;
 
-                //if msg -> hop <= nodes_pkt_last_sequence_num[node->id] : discard packet (already received)
-                if (msg -> hop >= nodes_pkt_last_sequence_num[node->id]){
-                    nodes_pkt_last_sequence_num[node->id] = msg -> hop;
-
-                    #ifdef DEBUG
-                    printf("%d: recv %d from %d:msg hop %d\n", node->id, msg->payload.value, msg->source, msg->hop);
-                    #endif
-
-                    send_broadcaster(node, msg);
-                    if (ret < 0)
-                    {
-                        handle_error("Error sending broadcast");
-                    }
+                    pthread_mutex_lock(&mutex_list_analyzer);
+                    nodes_pkt_received[msg -> source] += 1;
+                    pthread_mutex_unlock(&mutex_list_analyzer);
 
                     //add packet to the list of packets received
                     received_pkt(analyzer, msg);
+
+                    #ifdef DEBUG
+                    if(node -> id == 0)
+                    printf("%d: recv %d from %d:msg hop %d\n", node->id, msg->payload.value, msg->source, msg->sequence_num);
+                    #endif
                 }
+                send_broadcaster(node, msg);
+                if (ret < 0)
+                {
+                    handle_error("Error sending broadcast");
+                }
+
+                    
+            }
                 
 
-            }
         }
     }
 
@@ -359,7 +370,11 @@ void received_pkt(TrafficAnalyzer * analyzer, Message *msg) {
 
     gettimeofday(&datetime, NULL);
 
+    pthread_mutex_lock(&mutex_list_analyzer);
+
     append_node_traffic_analyzer(analyzer, msg, datetime);
+
+    pthread_mutex_unlock(&mutex_list_analyzer);
 }
 
 void append_node_traffic_analyzer(TrafficAnalyzer * traffic_analyzer, Message * msg, struct timeval datetime){
@@ -374,7 +389,7 @@ void append_node_traffic_analyzer(TrafficAnalyzer * traffic_analyzer, Message * 
     node -> msg = msg;
     node -> datetime = datetime;
     
-    if (traffic_analyzer -> head == NULL){
+    if (traffic_analyzer -> tail == NULL){
 
         traffic_analyzer -> head = node;
         traffic_analyzer -> tail = node;
@@ -387,14 +402,17 @@ void append_node_traffic_analyzer(TrafficAnalyzer * traffic_analyzer, Message * 
     }
 
     else{
-
-         node -> prev = traffic_analyzer -> tail;
+        
          node -> next = NULL;
+         node -> prev = traffic_analyzer -> tail;
+
+         traffic_analyzer -> tail -> next = node;
          traffic_analyzer -> tail = node;
 
          return;
     }
 }
+
 
 void * dump(void * args) {
     // Dump information about the trhoughput of all packets received every second
@@ -405,12 +423,14 @@ void * dump(void * args) {
     NodeTrafficAnalyzer * tmp;
     double diff;
 
+    //memset(nodes_pkt_received, 0, sizeof(nodes_pkt_received));
+
     while(1){
 
-        memset(nodes_pkt_received, 0, sizeof(nodes_pkt_received));
 
         sleep(1);
 
+/*
         if(analyzer -> tail == NULL){
 
             continue;
@@ -425,21 +445,35 @@ void * dump(void * args) {
             diff = (time_last_pkt_received.tv_sec - tmp->datetime.tv_sec) * 1000.0;      // seconds in milliseconds
             diff += (time_last_pkt_received.tv_usec - tmp->datetime.tv_usec) / 1000.0;   // microseconds in milliseconds
 
-            if (diff <= 2000){
+            if (diff <= 2000.0){
 
-                nodes_pkt_received[tmp->msg->source] += 1;
+                nodes_pkt_received[tmp -> msg -> source] += 1;
 
                 tmp = tmp -> prev;
+                
+               
             }
 
             else{
 
-                analyzer -> head = tmp -> next;
+                if (nodes_pkt_received[tmp -> msg -> source] > 0) nodes_pkt_received[tmp -> msg -> source] -= 1;
+
+                tmp -> next -> prev = tmp -> prev;
+
+                tmp = tmp -> prev;
+            }
+
+
+/*
+            else{
+
+                analyzer -> head = tmp;
+                analyzer -> head -> prev = NULL;
                 break;
             }
             
         }
-
+*/      
         print_throughput();
 
     }
@@ -450,10 +484,10 @@ void print_throughput(){
 
     for(int i=0; i <= NUM_NODES - 2; i++){
 
-        printf("%d: %04d, ", i, nodes_pkt_received[i] / 2);
+        printf("%d: %04d, ", i, nodes_pkt_received[i]);
     }
 
-    printf("%d: %04d\n", NUM_NODES - 1, nodes_pkt_received[NUM_NODES - 1] / 2);
+    printf("%d: %04d\n", NUM_NODES - 1, nodes_pkt_received[NUM_NODES - 1]);
 }
 
 ////
@@ -463,7 +497,6 @@ void handle_alarm(int signum){
     printf("Time expired. Terminating simulation...\n");
     exit(EXIT_SUCCESS);
 }
-
 
 
 //---------------
@@ -487,10 +520,12 @@ int main(int argc, char * argv[]) {
 
     Node * node = create_node(id);
 
-    memset(nodes_pkt_last_sequence_num, 0, sizeof(nodes_pkt_last_sequence_num));
+    memset(nodes_pkt_last_sequence_num, -1, sizeof(nodes_pkt_last_sequence_num));
     
     analyzer = create_traffic_analyzer();
 
+    memset(nodes_pkt_received, 0, sizeof(nodes_pkt_received));
+        
 
 
     //Using threads to handle the main nodes function simultaneously
@@ -522,7 +557,7 @@ int main(int argc, char * argv[]) {
     
     if (ret < 0){
 
-        handle_error("Broadcaster thread");
+        handle_error("Dump thread");
     }
 
 
