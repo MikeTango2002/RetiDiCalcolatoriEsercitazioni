@@ -23,13 +23,13 @@ typedef struct Payload {
 
 typedef struct Message {
     int source;
-    int hop;
+    int sequence_num;
     int payload_lenght;
     Payload  payload;
 } Message;
 
 
-Message * prepare_message(int source);
+Message * prepare_message(int source, int sequence_num);
 
 void send_to_all_interfaces(Node * node, Message * msg);
 
